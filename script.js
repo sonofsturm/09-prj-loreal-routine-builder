@@ -603,21 +603,73 @@ function getSelectedProductsJson() {
   }));
 }
 
-/* Send conversationMessages to the backend OpenAI/web-search proxy */
-async function fetchOpenAIReply() {
-  const response = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messages: conversationMessages,
-    }),
-  });
+/* Public Cloudflare Worker URL used when hosted statically (e.g., GitHub Pages) */
+const CLOUDFLARE_WORKER_URL = "https://damp-fog-2e23.guil-c5e.workers.dev/";
 
-  const data = await response.json();
+/* Parse JSON safely so HTML 404/405 error pages never throw SyntaxError */
+async function parseJsonSafely(response) {
+  const contentType = response.headers.get("content-type") || "";
+  const rawText = await response.text();
+  if (
+    !contentType.includes("application/json") &&
+    rawText.trim().startsWith("<")
+  ) {
+    return null;
+  }
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    return null;
+  }
+}
+
+/* Send conversationMessages to /api/chat on Node, or directly to the Cloudflare Worker on static hosts */
+async function fetchOpenAIReply() {
+  let response = null;
+  let data = null;
+
+  const isStaticGitHubPages = window.location.hostname.endsWith("github.io");
+
+  if (!isStaticGitHubPages) {
+    try {
+      response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: conversationMessages,
+        }),
+      });
+      if (response.status !== 404 && response.status !== 405) {
+        data = await parseJsonSafely(response);
+      }
+    } catch {
+      /* Fall back to direct Cloudflare Worker request below */
+    }
+  }
+
+  if (!data) {
+    response = await fetch(CLOUDFLARE_WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o-search-preview",
+        web_search_options: { search_context_size: "medium" },
+        messages: conversationMessages,
+      }),
+    });
+    data = await parseJsonSafely(response);
+    if (!data) {
+      throw new Error(
+        "Received an unexpected non-JSON response from the AI service."
+      );
+    }
+  }
 
   if (!response.ok) {
     throw new Error(
-      data.error || "Unable to generate a response from the OpenAI API."
+      data?.error?.message ||
+        data?.error ||
+        "Unable to generate a response from the OpenAI API."
     );
   }
 
