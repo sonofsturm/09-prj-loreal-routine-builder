@@ -1,5 +1,8 @@
 /* Get references to DOM elements */
 const categoryFilter = document.getElementById("categoryFilter");
+const productSearch = document.getElementById("productSearch");
+const clearSearchBtn = document.getElementById("clearSearchBtn");
+const catalogCount = document.getElementById("catalogCount");
 const productsContainer = document.getElementById("productsContainer");
 const selectedProductsList = document.getElementById("selectedProductsList");
 const clearSelectedBtn = document.getElementById("clearSelectedBtn");
@@ -12,9 +15,64 @@ const sendBtn = document.getElementById("sendBtn");
 /* Key used to save selected products in localStorage */
 const SELECTED_PRODUCTS_STORAGE_KEY = "lorealSelectedProducts";
 
+/* Automatically apply RTL direction when an RTL language is active */
+const RTL_LANGUAGE_PATTERN = /^(ar|he|iw|fa|ur|ps|sd|yi|ckb|syr|dv|ug)\b/i;
+
+function detectRtlDirection() {
+  const htmlEl = document.documentElement;
+  const htmlLang = (htmlEl.getAttribute("lang") || "").trim();
+  const browserLang = (
+    (Array.isArray(navigator.languages) && navigator.languages[0]) ||
+    navigator.language ||
+    ""
+  ).trim();
+
+  if (htmlEl.classList.contains("translated-rtl")) {
+    return "rtl";
+  }
+  if (htmlEl.classList.contains("translated-ltr")) {
+    return "ltr";
+  }
+  if (RTL_LANGUAGE_PATTERN.test(htmlLang)) {
+    return "rtl";
+  }
+  if (htmlLang && !/^en\b/i.test(htmlLang)) {
+    return "ltr";
+  }
+  if (RTL_LANGUAGE_PATTERN.test(browserLang)) {
+    return "rtl";
+  }
+  return htmlEl.getAttribute("dir") === "rtl" ? "rtl" : "ltr";
+}
+
+function syncLayoutDirection() {
+  const nextDir = detectRtlDirection();
+  if (document.documentElement.dir !== nextDir) {
+    document.documentElement.dir = nextDir;
+  }
+}
+
+syncLayoutDirection();
+window.addEventListener("languagechange", syncLayoutDirection);
+
+const htmlDirectionObserver = new MutationObserver((mutations) => {
+  const shouldSync = mutations.some(
+    (mutation) =>
+      mutation.attributeName === "lang" || mutation.attributeName === "class"
+  );
+  if (shouldSync) {
+    syncLayoutDirection();
+  }
+});
+
+htmlDirectionObserver.observe(document.documentElement, {
+  attributes: true,
+  attributeFilter: ["lang", "class"],
+});
+
 /* System instructions for the L'Oréal routine advisor */
 const SYSTEM_PROMPT =
-  "You are a knowledgeable L'Oréal beauty and routine advisor. Build clear, step-by-step personalized routines using ONLY the selected products provided as JSON (explaining order of use, AM/PM timing, and why each fits). For follow-up questions, ONLY answer questions related to the generated routine or beauty and personal care topics such as skincare, haircare, hair color, hair styling, makeup, fragrance, suncare, and men's grooming. If the user asks about anything outside those topics, politely explain that you can only help with their routine and beauty-related topics, and invite them to ask a related question.";
+  "You are a knowledgeable L'Oréal beauty and routine advisor with access to real-time web search information. Build clear, step-by-step personalized routines using ONLY the selected products provided as JSON (explaining order of use, AM/PM timing, and why each fits), enriched with current product and routine guidance. Include helpful source links or citations as markdown links like [Source Title](https://...) when referencing current L'Oréal or brand information. For follow-up questions, ONLY answer questions related to the generated routine or beauty and personal care topics such as skincare, haircare, hair color, hair styling, makeup, fragrance, suncare, and men's grooming. If the user asks about anything outside those topics, politely explain that you can only help with their routine and beauty-related topics, and invite them to ask a related question.";
 
 /* Load saved product selections from localStorage safely */
 function loadSavedSelectedProducts() {
@@ -46,26 +104,39 @@ function saveSelectedProducts() {
 
 /* Store loaded products, selected products, and chat history */
 let allProducts = [];
+let productsLoadPromise = null;
 let selectedProducts = loadSavedSelectedProducts();
 let conversationMessages = [{ role: "system", content: SYSTEM_PROMPT }];
 let chatDisplayEntries = [];
 
-/* Show initial placeholder until user selects a category */
-productsContainer.innerHTML = `
-  <div class="placeholder-message">
-    Select a category to view products
-  </div>
-`;
+/* Show initial placeholder until user selects a category or types a search */
+function showInitialCatalogPlaceholder() {
+  if (catalogCount) {
+    catalogCount.textContent = "";
+  }
+  productsContainer.innerHTML = `
+    <div class="placeholder-message">
+      Select a category or search by keyword to view products
+    </div>
+  `;
+}
+
+showInitialCatalogPlaceholder();
 
 /* Load product data from JSON file (and cache it for quick lookups) */
 async function loadProducts() {
   if (allProducts.length > 0) {
     return allProducts;
   }
-  const response = await fetch("products.json");
-  const data = await response.json();
-  allProducts = data.products;
-  return allProducts;
+  if (!productsLoadPromise) {
+    productsLoadPromise = fetch("products.json")
+      .then((response) => response.json())
+      .then((data) => {
+        allProducts = data.products;
+        return allProducts;
+      });
+  }
+  return productsLoadPromise;
 }
 
 /* Check if a product is currently in the selectedProducts array */
@@ -100,10 +171,10 @@ function renderSelectedProducts() {
     .map(
       (product) => `
     <div class="selected-product-item" data-product-id="${product.id}">
-      <img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}">
+      <img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}" referrerpolicy="no-referrer">
       <div class="selected-product-details">
-        <span class="selected-product-name">${escapeHtml(product.name)}</span>
-        <span class="selected-product-brand">${escapeHtml(product.brand)}</span>
+        <span class="selected-product-name" dir="auto">${escapeHtml(product.name)}</span>
+        <span class="selected-product-brand" dir="auto">${escapeHtml(product.brand)}</span>
       </div>
       <button
         type="button"
@@ -198,6 +269,11 @@ function toggleProductDetails(button) {
 
 /* Create HTML for displaying product cards */
 function displayProducts(products) {
+  if (catalogCount) {
+    catalogCount.textContent =
+      products.length === 1 ? "1 formula" : `${products.length} formulas`;
+  }
+
   if (products.length === 0) {
     productsContainer.innerHTML = `
       <div class="placeholder-message">
@@ -212,6 +288,7 @@ function displayProducts(products) {
       const selected = isProductSelected(product.id);
       const safeName = escapeHtml(product.name);
       const safeBrand = escapeHtml(product.brand);
+      const safeCategory = escapeHtml(product.category);
       const safeDescription = escapeHtml(product.description);
       const safeImage = escapeHtml(product.image);
 
@@ -221,7 +298,7 @@ function displayProducts(products) {
       data-product-id="${product.id}"
     >
       <span class="selected-badge" aria-hidden="true">
-        <i class="fa-solid fa-check"></i>
+        <i class="fa-solid fa-check"></i> Selected
       </span>
       <div
         class="product-card-main"
@@ -230,10 +307,21 @@ function displayProducts(products) {
         aria-pressed="${selected}"
         aria-label="Select ${safeName} by ${safeBrand}"
       >
-        <img src="${safeImage}" alt="${safeName}">
+        <div class="product-image-frame">
+          <img
+            src="${safeImage}"
+            alt="${safeName}"
+            referrerpolicy="no-referrer"
+            onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
+          >
+          <div class="product-image-fallback" aria-hidden="true">
+            <i class="fa-solid fa-spray-can-sparkles"></i>
+            <span>${safeBrand}</span>
+          </div>
+        </div>
         <div class="product-info">
+          <p class="product-brand">${safeBrand} <span aria-hidden="true">&middot;</span> ${safeCategory}</p>
           <h3>${safeName}</h3>
-          <p>${safeBrand}</p>
         </div>
       </div>
       <div class="product-card-actions">
@@ -248,7 +336,7 @@ function displayProducts(products) {
         </button>
       </div>
       <div id="product-desc-${product.id}" class="product-description" hidden>
-        <p>${safeDescription}</p>
+        <p dir="auto">${safeDescription}</p>
       </div>
     </article>
   `;
@@ -304,33 +392,138 @@ clearSelectedBtn.addEventListener("click", () => {
   clearAllSelectedProducts();
 });
 
-/* Filter and display products when category changes */
-categoryFilter.addEventListener("change", async (e) => {
-  const products = await loadProducts();
-  const selectedCategory = e.target.value;
+/* Filter products by both selected category and search keywords */
+async function applyProductFilters() {
+  const selectedCategory = categoryFilter.value;
+  const rawQuery = productSearch.value.trim().toLowerCase();
+  clearSearchBtn.hidden = productSearch.value.length === 0;
 
-  /* filter() creates a new array containing only products 
-     where the category matches what the user selected */
-  const filteredProducts = products.filter(
-    (product) => product.category === selectedCategory
-  );
+  if (!selectedCategory && !rawQuery) {
+    showInitialCatalogPlaceholder();
+    return;
+  }
+
+  const products = await loadProducts();
+  const searchTerms = rawQuery.split(/\s+/).filter(Boolean);
+
+  const filteredProducts = products.filter((product) => {
+    const matchesCategory =
+      !selectedCategory ||
+      selectedCategory === "all" ||
+      product.category === selectedCategory;
+
+    if (!matchesCategory) {
+      return false;
+    }
+
+    if (searchTerms.length === 0) {
+      return true;
+    }
+
+    const searchableText =
+      `${product.name} ${product.brand} ${product.category} ${product.description}`.toLowerCase();
+    return searchTerms.every((term) => searchableText.includes(term));
+  });
 
   displayProducts(filteredProducts);
+}
+
+/* Filter and display products when category changes */
+categoryFilter.addEventListener("change", () => {
+  if (productSearch.value.length > 0) {
+    productSearch.value = "";
+  }
+  applyProductFilters();
+});
+
+/* Filter and display products live as the user types in the search field */
+productSearch.addEventListener("input", () => {
+  if (productSearch.value.trim().length > 0) {
+    categoryFilter.value = "all";
+  }
+  applyProductFilters();
+});
+
+/* Clear the search field and re-apply the active category filter */
+clearSearchBtn.addEventListener("click", () => {
+  productSearch.value = "";
+  productSearch.focus();
+  applyProductFilters();
 });
 
 /* Render initial empty state in Selected Products */
 renderSelectedProducts();
 
-/* Format basic markdown bold (**text**) safely after HTML escaping */
+/* Convert markdown links, URLs, headings, and bold text into safe HTML */
 function formatMessageHtml(text) {
-  return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  let html = escapeHtml(text);
+
+  /* Render markdown headings (## or ###) cleanly */
+  html = html.replace(
+    /^#{2,4}\s+(.+)$/gm,
+    '<strong class="chat-md-heading">$1</strong>'
+  );
+
+  /* Render bold (**text**) */
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+
+  /* Render markdown links [label](https://...) safely, preserving placeholders */
+  const linkPlaceholders = [];
+  html = html.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    (_match, label, url) => {
+      const cleanUrl = url.replace(/[.,;!?]+$/, "");
+      const token = `__LINK_TOKEN_${linkPlaceholders.length}__`;
+      linkPlaceholders.push(
+        `<a href="${cleanUrl}" target="_blank" rel="noopener noreferrer" class="chat-inline-link">${label}</a>`
+      );
+      return token;
+    }
+  );
+
+  /* Linkify any remaining bare http(s) URLs */
+  html = html.replace(/(https?:\/\/[^\s<]+)/g, (rawUrl) => {
+    const cleanUrl = rawUrl.replace(/[).,;!?]+$/, "");
+    const trailing = rawUrl.slice(cleanUrl.length);
+    return `<a href="${cleanUrl}" target="_blank" rel="noopener noreferrer" class="chat-inline-link">${cleanUrl}</a>${trailing}`;
+  });
+
+  /* Restore markdown link elements */
+  linkPlaceholders.forEach((anchorHtml, idx) => {
+    html = html.replace(`__LINK_TOKEN_${idx}__`, anchorHtml);
+  });
+
+  return html;
 }
 
-/* Render chat messages and optional loading state inside #chatWindow */
-function renderChatWindow(
-  isLoading = false,
-  loadingText = "Thinking…"
-) {
+/* Extract http(s) links from markdown or raw URLs inside a reply */
+function extractLinksFromText(text) {
+  const found = [];
+  const seen = new Set();
+
+  for (const match of String(text).matchAll(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g
+  )) {
+    const url = match[2].replace(/[.,;!?]+$/, "");
+    if (!seen.has(url)) {
+      seen.add(url);
+      found.push({ title: match[1], url });
+    }
+  }
+
+  for (const match of String(text).matchAll(/https?:\/\/[^\s<>()]+/g)) {
+    const url = match[0].replace(/[.,;!?]+$/, "");
+    if (!seen.has(url)) {
+      seen.add(url);
+      found.push({ title: url, url });
+    }
+  }
+
+  return found;
+}
+
+/* Render chat messages, citations, and optional loading state inside #chatWindow */
+function renderChatWindow(isLoading = false, loadingText = "Searching & thinking…") {
   if (chatDisplayEntries.length === 0 && !isLoading) {
     chatWindow.innerHTML = `
       <p class="chat-placeholder">
@@ -348,10 +541,40 @@ function renderChatWindow(
           : entry.role === "error"
             ? "Notice"
             : "L'Oréal Advisor";
+
+      const citations = Array.isArray(entry.citations) ? entry.citations : [];
+      const citationsHtml =
+        entry.role === "assistant" && citations.length > 0
+          ? `
+        <div class="chat-citations">
+          <span class="chat-citations-title">Sources &amp; Citations</span>
+          <ul class="chat-citations-list">
+            ${citations
+              .map(
+                (cite) => `
+              <li>
+                <a
+                  href="${escapeHtml(cite.url)}"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  ${escapeHtml(cite.title || cite.url)}
+                  <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i>
+                </a>
+              </li>
+            `
+              )
+              .join("")}
+          </ul>
+        </div>
+      `
+          : "";
+
       return `
     <div class="chat-message ${entry.role}">
       <span class="chat-message-label">${label}</span>
-      <div class="chat-message-body">${formatMessageHtml(entry.content)}</div>
+      <div class="chat-message-body" dir="auto">${formatMessageHtml(entry.content)}</div>
+      ${citationsHtml}
     </div>
   `;
     })
@@ -380,7 +603,7 @@ function getSelectedProductsJson() {
   }));
 }
 
-/* Send the conversationMessages array to the backend OpenAI proxy */
+/* Send conversationMessages to the backend OpenAI/web-search proxy */
 async function fetchOpenAIReply() {
   const response = await fetch("/api/chat", {
     method: "POST",
@@ -403,7 +626,40 @@ async function fetchOpenAIReply() {
     throw new Error("The OpenAI API returned an empty response.");
   }
 
-  return reply;
+  /* Gather citations from OpenAI annotations, backend citations, and inline links */
+  const seenUrls = new Set();
+  const citations = [];
+  const addCite = (item) => {
+    if (
+      item &&
+      typeof item.url === "string" &&
+      /^https?:\/\//i.test(item.url) &&
+      !seenUrls.has(item.url)
+    ) {
+      seenUrls.add(item.url);
+      citations.push({
+        title: item.title || item.url,
+        url: item.url,
+      });
+    }
+  };
+
+  if (Array.isArray(data.citations)) {
+    data.citations.forEach(addCite);
+  }
+
+  const annotations = data?.choices?.[0]?.message?.annotations;
+  if (Array.isArray(annotations)) {
+    annotations.forEach((ann) => {
+      if (ann?.type === "url_citation" && ann.url_citation) {
+        addCite(ann.url_citation);
+      }
+    });
+  }
+
+  extractLinksFromText(reply).forEach(addCite);
+
+  return { reply, citations };
 }
 
 /* Toggle loading state on buttons while waiting for the API */
@@ -432,7 +688,7 @@ generateRoutineBtn.addEventListener("click", async () => {
     .join(", ");
 
   /* Send the full JSON details to OpenAI while showing a clean summary in chat */
-  const apiPrompt = `Build a personalized routine using ONLY these currently selected products (provided as JSON):\n\n${JSON.stringify(
+  const apiPrompt = `Build a personalized routine using ONLY these currently selected products (provided as JSON). Include current best-practice tips and cite relevant L'Oréal or brand links:\n\n${JSON.stringify(
     selectedProductsData,
     null,
     2
@@ -447,12 +703,12 @@ generateRoutineBtn.addEventListener("click", async () => {
   });
 
   setChatBusy(true);
-  renderChatWindow(true, "Building your personalized routine…");
+  renderChatWindow(true, "Searching current L'Oréal info & building your routine…");
 
   try {
-    const reply = await fetchOpenAIReply();
+    const { reply, citations } = await fetchOpenAIReply();
     conversationMessages.push({ role: "assistant", content: reply });
-    chatDisplayEntries.push({ role: "assistant", content: reply });
+    chatDisplayEntries.push({ role: "assistant", content: reply, citations });
   } catch (error) {
     /* Remove the failed request turn so conversation history stays valid */
     conversationMessages.pop();
@@ -478,12 +734,12 @@ chatForm.addEventListener("submit", async (e) => {
   chatDisplayEntries.push({ role: "user", content: userMessage });
 
   setChatBusy(true);
-  renderChatWindow(true, "Thinking…");
+  renderChatWindow(true, "Searching current L'Oréal info…");
 
   try {
-    const reply = await fetchOpenAIReply();
+    const { reply, citations } = await fetchOpenAIReply();
     conversationMessages.push({ role: "assistant", content: reply });
-    chatDisplayEntries.push({ role: "assistant", content: reply });
+    chatDisplayEntries.push({ role: "assistant", content: reply, citations });
   } catch (error) {
     /* Remove the failed user turn so conversation history stays valid */
     conversationMessages.pop();
